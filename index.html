@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time Firestore App</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for aesthetic appeal */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7fafc;
+        }
+        .card {
+            background-color: #ffffff;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            border-radius: 12px;
+            padding: 3rem;
+            max-width: 500px;
+            margin: 2rem auto;
+            text-align: center;
+        }
+        .btn {
+            transition: all 0.15s ease-in-out;
+        }
+        .btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06);
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app" class="min-h-screen flex items-center justify-center p-4">
+        <div class="card w-full">
+            <h1 class="text-3xl font-extrabold text-gray-800 mb-6">Real-time Counter Demo</h1>
+            <p id="auth-status" class="text-sm text-gray-500 mb-4">Initializing...</p>
+            
+            <div id="main-content" class="hidden">
+                <!-- User ID Display (Mandatory for multi-user apps) -->
+                <div class="mb-8 p-3 bg-indigo-50 rounded-lg">
+                    <p class="text-xs font-semibold text-indigo-700 uppercase tracking-wider mb-1">Your User ID</p>
+                    <code id="user-id-display" class="block text-sm text-indigo-900 font-mono break-all"></code>
+                </div>
+
+                <div class="mb-8">
+                    <p class="text-6xl font-black text-indigo-600 mb-4" id="counter-display">0</p>
+                    <p class="text-lg text-gray-600">The counter updates instantly for all users!</p>
+                </div>
+                
+                <div class="flex justify-center space-x-4">
+                    <button id="increment-btn" 
+                            class="btn bg-indigo-600 text-white font-semibold py-3 px-6 rounded-xl shadow-md disabled:bg-indigo-300">
+                        Increment Counter
+                    </button>
+                    <button id="decrement-btn" 
+                            class="btn bg-red-600 text-white font-semibold py-3 px-6 rounded-xl shadow-md disabled:bg-red-300">
+                        Decrement Counter
+                    </button>
+                </div>
+            </div>
+
+             <!-- Loading/Error State -->
+            <div id="loading-spinner" class="flex flex-col items-center justify-center p-10">
+                <svg class="animate-spin -ml-1 mr-3 h-8 w-8 text-indigo-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <p class="mt-4 text-gray-600">Connecting to the database...</p>
+            </div>
+            <p id="error-message" class="hidden text-red-500 mt-4 font-medium"></p>
+        </div>
+    </div>
+
+    <!-- Firebase SDK Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot, runTransaction, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // IMPORTANT: Use the global variables provided by the Canvas environment
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        // Set Firebase logging level to Debug
+        setLogLevel('Debug');
+
+        let app;
+        let db;
+        let auth;
+        let userId = null;
+        let isAuthReady = false;
+
+        const authStatusEl = document.getElementById('auth-status');
+        const userIdDisplayEl = document.getElementById('user-id-display');
+        const counterDisplayEl = document.getElementById('counter-display');
+        const mainContentEl = document.getElementById('main-content');
+        const loadingSpinnerEl = document.getElementById('loading-spinner');
+        const errorEl = document.getElementById('error-message');
+        const incrementBtn = document.getElementById('increment-btn');
+        const decrementBtn = document.getElementById('decrement-btn');
+
+        /**
+         * Converts the raw data path for a public document.
+         * Public data is shared by all users of this app.
+         * Path: /artifacts/{appId}/public/data/{collection_name}/{documentId}
+         */
+        const getPublicDocPath = (docId) => {
+            return `artifacts/${appId}/public/data/global_counter/${docId}`;
+        };
+
+        /**
+         * Initializes Firebase and sets up authentication.
+         */
+        async function initializeFirebase() {
+            if (!firebaseConfig) {
+                authStatusEl.textContent = 'Error: Firebase config not available.';
+                errorEl.textContent = 'Firebase configuration is missing.';
+                errorEl.classList.remove('hidden');
+                loadingSpinnerEl.classList.add('hidden');
+                return;
+            }
+
+            try {
+                // 1. Initialize App and Services
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                authStatusEl.textContent = 'Authenticating...';
+
+                // 2. Authenticate the User
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // 3. Set up Auth State Listener
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        
+                        authStatusEl.textContent = `Authenticated successfully.`;
+                        userIdDisplayEl.textContent = userId;
+                        loadingSpinnerEl.classList.add('hidden');
+                        mainContentEl.classList.remove('hidden');
+
+                        // Start listening to data once authenticated
+                        setupRealtimeListener();
+                        setupEventListeners();
+
+                        // Initialize the counter if it doesn't exist
+                        initializeCounter();
+                    } else {
+                        userId = null;
+                        isAuthReady = false;
+                        authStatusEl.textContent = 'Waiting for authentication...';
+                        loadingSpinnerEl.classList.remove('hidden');
+                        mainContentEl.classList.add('hidden');
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase Initialization Error:", error);
+                authStatusEl.textContent = `Authentication failed: ${error.message}`;
+                errorEl.textContent = `Authentication failed: ${error.message}`;
+                errorEl.classList.remove('hidden');
+                loadingSpinnerEl.classList.add('hidden');
+            }
+        }
+
+        /**
+         * Sets up the real-time listener for the public counter.
+         */
+        function setupRealtimeListener() {
+            if (!db) {
+                console.error("Firestore not initialized.");
+                return;
+            }
+
+            const counterRef = doc(db, getPublicDocPath('master_counter'));
+
+            // onSnapshot provides real-time updates
+            onSnapshot(counterRef, (docSnap) => {
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    const count = data.value || 0;
+                    counterDisplayEl.textContent = count;
+                    console.log("Real-time Update: Counter value is", count);
+                } else {
+                    counterDisplayEl.textContent = '0';
+                    console.log("No counter document found. Initializing now.");
+                }
+            }, (error) => {
+                console.error("Snapshot listener error:", error);
+                errorEl.textContent = `Real-time error: ${error.message}`;
+                errorEl.classList.remove('hidden');
+            });
+        }
+
+        /**
+         * Initializes the counter document if it doesn't exist.
+         */
+        async function initializeCounter() {
+            const counterRef = doc(db, getPublicDocPath('master_counter'));
+            try {
+                // Using setDoc with merge: true to avoid overwriting and create if not exists
+                await setDoc(counterRef, { value: 0, lastUpdatedBy: userId, createdAt: new Date().toISOString() }, { merge: true });
+                console.log("Counter initialized or checked.");
+            } catch (e) {
+                console.error("Error initializing counter:", e);
+            }
+        }
+
+        /**
+         * Function to update the counter using a transaction for safe concurrent writes.
+         */
+        async function updateCounter(increment) {
+            if (!isAuthReady || !userId) {
+                console.warn("Authentication not ready. Cannot update counter.");
+                return;
+            }
+            
+            const counterRef = doc(db, getPublicDocPath('master_counter'));
+            
+            // Disable buttons during transaction
+            incrementBtn.disabled = true;
+            decrementBtn.disabled = true;
+
+            try {
+                await runTransaction(db, async (transaction) => {
+                    const counterDoc = await transaction.get(counterRef);
+
+                    if (!counterDoc.exists()) {
+                        // This shouldn't happen if initializeCounter runs, but good fallback
+                        transaction.set(counterRef, { value: increment, lastUpdatedBy: userId, timestamp: Date.now() });
+                        return;
+                    }
+
+                    const newCount = (counterDoc.data().value || 0) + increment;
+                    
+                    // Update the document
+                    transaction.update(counterRef, { 
+                        value: newCount, 
+                        lastUpdatedBy: userId,
+                        timestamp: Date.now() 
+                    });
+                });
+                console.log(`Counter updated by ${increment}`);
+            } catch (e) {
+                console.error("Transaction failed:", e);
+                // Inform the user gracefully (using custom UI instead of alert)
+                errorEl.textContent = `Update failed: ${e.message}`;
+                errorEl.classList.remove('hidden');
+                setTimeout(() => errorEl.classList.add('hidden'), 5000);
+            } finally {
+                // Re-enable buttons
+                incrementBtn.disabled = false;
+                decrementBtn.disabled = false;
+            }
+        }
+
+        /**
+         * Sets up button click event listeners.
+         */
+        function setupEventListeners() {
+            incrementBtn.onclick = () => updateCounter(1);
+            decrementBtn.onclick = () => updateCounter(-1);
+        }
+
+        // Start the application initialization
+        window.onload = initializeFirebase;
+    </script>
+</body>
+</html>
